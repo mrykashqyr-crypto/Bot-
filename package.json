@@ -1,7 +1,7 @@
 {
-  "name": "whatsapp-gemini-bot",
+  "name": "tariq-whatsapp-bot",
   "version": "1.0.0",
-  "description": "بوت واتساب ذكي بقوة Gemini",
+  "description": "بوت واتساب طارق - أقصى سرعة",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
@@ -11,7 +11,8 @@
     "@whiskeysockets/baileys": "^6.7.0",
     "@hapi/boom": "^10.0.1",
     "axios": "^1.6.0",
-    "pino": "^8.17.0"
+    "pino": "^8.17.0",
+    "node-cache": "^5.1.2"
   },
   "engines": {
     "node": ">=18.0.0"
