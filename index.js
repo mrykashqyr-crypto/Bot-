@@ -15,15 +15,15 @@ async function startBot() {
   const sock = makeWASocket({
     version,
     auth: state,
-    printQRInTerminal: false, // بدون QR
+    printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
   });
 
-  // ===== ربط برقم الهاتف (Pairing Code) =====
+  // ===== ربط برقم الهاتف =====
   if (!sock.authState.creds.registered) {
     const phoneNumber = await question('أدخل رقم هاتفك مع كود الدولة (مثال: 9627XXXXXXXX): ');
     const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
-    
+
     setTimeout(async () => {
       const code = await sock.requestPairingCode(cleanNumber);
       console.log(`\n✅ كود الربط: ${code}`);
@@ -32,7 +32,7 @@ async function startBot() {
     }, 3000);
   }
 
-  // ===== حفظ بيانات الجلسة =====
+  // ===== حفظ الجلسة =====
   sock.ev.on('creds.update', saveCreds);
 
   // ===== حالة الاتصال =====
@@ -48,7 +48,7 @@ async function startBot() {
       if (shouldReconnect) startBot();
 
     } else if (connection === 'open') {
-      console.log('✅ البوت متصل وشغال!');
+      console.log('✅ البوت متصل وشغال مع Gemini!');
       rl.close();
     }
   });
@@ -58,7 +58,7 @@ async function startBot() {
     if (type !== 'notify') return;
 
     for (const msg of messages) {
-      if (msg.key.fromMe) continue; // تجاهل رسائلنا نحن
+      if (msg.key.fromMe) continue;
       if (!msg.message) continue;
 
       const sender = msg.key.remoteJid;
@@ -80,7 +80,7 @@ async function startBot() {
             '!مساعدة - قائمة الأوامر\n' +
             '!وقت - الوقت الحالي\n' +
             '!ترحيب - رسالة ترحيب\n\n' +
-            'أو اكتب أي سؤال وسأجيبك بالذكاء الاصطناعي 🧠'
+            'أو اكتب أي سؤال وسأجيبك بالذكاء الاصطناعي Gemini 🧠'
         });
         continue;
       }
@@ -93,48 +93,47 @@ async function startBot() {
 
       if (body === '!ترحيب' || body === '!hi') {
         await sock.sendMessage(sender, {
-          text: '👋 أهلاً وسهلاً!\nأنا بوتك الذكي، كيف أقدر أساعدك اليوم؟'
+          text: '👋 أهلاً وسهلاً!\nأنا بوتك الذكي بقوة Gemini، كيف أقدر أساعدك؟'
         });
         continue;
       }
 
-      // ===== ذكاء اصطناعي =====
+      // ===== Gemini AI =====
       try {
-        await sock.sendPresenceUpdate('composing', sender); // يظهر "يكتب..."
-        const aiReply = await getAIResponse(text);
+        await sock.sendPresenceUpdate('composing', sender);
+        const aiReply = await getGeminiResponse(text);
         await sock.sendMessage(sender, { text: aiReply });
       } catch (err) {
-        console.error('خطأ في الذكاء الاصطناعي:', err.message);
+        console.error('خطأ في Gemini:', err.message);
         await sock.sendMessage(sender, { text: '⚠️ صار خطأ، جرب مرة ثانية.' });
       }
     }
   });
 }
 
-// ===== دالة الذكاء الاصطناعي =====
-async function getAIResponse(userMessage) {
-  const response = await axios.post(
-    'https://api.anthropic.com/v1/messages',
-    {
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1024,
-      system: `أنت مساعد ذكي ومفيد على واتساب. ردودك تكون:
+// ===== دالة Gemini AI =====
+async function getGeminiResponse(userMessage) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+
+  const response = await axios.post(url, {
+    system_instruction: {
+      parts: [{
+        text: `أنت مساعد ذكي ومفيد على واتساب. ردودك تكون:
 - مختصرة وواضحة
 - باللغة العربية دائماً
 - ودودة ومحترمة
-- بدون تنسيق Markdown معقد`,
-      messages: [{ role: 'user', content: userMessage }]
+- بدون تنسيق Markdown معقد`
+      }]
     },
-    {
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': process.env.ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      }
-    }
-  );
+    contents: [{
+      parts: [{ text: userMessage }]
+    }]
+  }, {
+    headers: { 'Content-Type': 'application/json' }
+  });
 
-  return response.data.content[0].text;
+  return response.data.candidates[0].content.parts[0].text;
 }
 
 // ===== ابدأ =====
