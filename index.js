@@ -6,13 +6,13 @@ const {
   makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
-const axios = require('axios');
 const pino = require('pino');
 const http = require('http');
 const NodeCache = require('node-cache');
 
 const BOT_NAME = 'طارق';
 const msgRetryCounterCache = new NodeCache();
+const PHONE_NUMBER = process.env.PHONE_NUMBER;
 
 // ===== سيرفر HTTP عشان Render =====
 const PORT = process.env.PORT || 3000;
@@ -23,11 +23,35 @@ http.createServer((req, res) => {
   console.log(`🌐 ${BOT_NAME} يستمع على بورت ${PORT}`);
 });
 
-const PHONE_NUMBER = process.env.PHONE_NUMBER;
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+// ===== قائمة الكلمات السيئة بالعربي =====
+const BAD_WORDS = [
+  'كلب', 'حمار', 'غبي', 'احمق', 'معرص', 'ابن الحرام',
+  'يلعن', 'عرص', 'شرموط', 'قحبة', 'زبالة', 'خنزير',
+  'تبان', 'مجنون', 'بلطجي', 'كذاب', 'حقير', 'وسخ',
+  'منيوك', 'زاني', 'فاسق', 'لقيط', 'عاهرة', 'ديوث'
+];
 
-// ===== كاش للردود عشان أقصى سرعة =====
-const responseCache = new Map();
+// ===== تحقق إذا الرسالة فيها كلام سيء =====
+function hasBadWord(text) {
+  const lower = text.toLowerCase();
+  return BAD_WORDS.some(word => lower.includes(word));
+}
+
+// ===== الأسئلة الشائعة والردود =====
+const FAQ = [
+  { keywords: ['وقت', 'الساعة', 'كم الساعة'], action: 'time' },
+  { keywords: ['اهلا', 'أهلا', 'هلا', 'مرحبا', 'مرحبً', 'السلام'], action: 'welcome' },
+  { keywords: ['مساعدة', 'help', 'اوامر', 'أوامر'], action: 'help' },
+  { keywords: ['شكرا', 'شكراً', 'تسلم', 'يسلمو'], action: 'thanks' },
+];
+
+function getFAQAction(text) {
+  const lower = text.toLowerCase();
+  for (const faq of FAQ) {
+    if (faq.keywords.some(k => lower.includes(k))) return faq.action;
+  }
+  return null;
+}
 
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
@@ -42,8 +66,8 @@ async function startBot() {
     printQRInTerminal: false,
     logger: pino({ level: 'silent' }),
     msgRetryCounterCache,
-    generateHighQualityLinkPreview: false, // أسرع
-    syncFullHistory: false,                // أسرع
+    generateHighQualityLinkPreview: false,
+    syncFullHistory: false,
     markOnlineOnConnect: true,
   });
 
@@ -60,7 +84,7 @@ async function startBot() {
         console.log(`\n✅ كود الربط: ${code}`);
         console.log('واتساب ← الأجهزة المرتبطة ← ربط جهاز ← ربط برقم الهاتف\n');
       } catch (err) {
-        console.error('خطأ في الكود:', err.message);
+        console.error('خطأ:', err.message);
       }
     }, 3000);
   }
@@ -73,107 +97,191 @@ async function startBot() {
       const shouldReconnect = (lastDisconnect?.error instanceof Boom)
         ? lastDisconnect.error.output?.statusCode !== DisconnectReason.loggedOut
         : true;
-      console.log(`❌ انقطع الاتصال...`);
+      console.log('❌ انقطع الاتصال، جاري إعادة المحاولة...');
       if (shouldReconnect) startBot();
     } else if (connection === 'open') {
       console.log(`✅ ${BOT_NAME} متصل وجاهز!`);
     }
   });
 
-  // ===== استقبال الرسائل بأقصى سرعة =====
+  // ===== استقبال الرسائل =====
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
-    // معالجة كل الرسائل بالتوازي عشان أقصى سرعة
-    await Promise.all(messages.map(async (msg) => {
+    for (const msg of messages) {
       if (msg.key.fromMe) return;
       if (!msg.message) return;
 
       const sender = msg.key.remoteJid;
+      const isGroup = sender.endsWith('@g.us');
+      const senderUser = msg.key.participant || msg.key.remoteJid;
+
       const text =
         msg.message?.conversation ||
         msg.message?.extendedTextMessage?.text ||
+        msg.message?.imageMessage?.caption ||
         '';
 
-      if (!text.trim()) return;
+      if (!text.trim()) continue;
+      const body = text.trim();
+      console.log(`📩 [${isGroup ? 'مجموعة' : 'خاص'}] ${senderUser}: ${body}`);
 
-      const body = text.trim().toLowerCase();
-      console.log(`📩 ${sender}: ${text}`);
+      // ===== فلتر الكلام السيء (للمجموعات فقط) =====
+      if (isGroup && hasBadWord(body)) {
+        try {
+          // احذف الرسالة
+          await sock.sendMessage(sender, { delete: msg.key });
+          // حذر العضو
+          await sock.sendMessage(sender, {
+            text: `⚠️ تحذير @${senderUser.split('@')[0]}\nالكلام السيء ممنوع في هذه المجموعة!`,
+            mentions: [senderUser]
+          });
+          console.log(`🚫 حذف رسالة سيئة من ${senderUser}`);
+        } catch (err) {
+          console.error('خطأ في حذف الرسالة:', err.message);
+        }
+        continue;
+      }
 
-      // ===== أوامر خاصة =====
-      if (body === '!مساعدة' || body === '!help') {
-        return sock.sendMessage(sender, {
+      // ===== أوامر المشرف (للمجموعات فقط) =====
+      if (isGroup) {
+        // تحقق إذا المرسل أدمن
+        const groupMeta = await sock.groupMetadata(sender);
+        const isAdmin = groupMeta.participants
+          .find(p => p.id === senderUser)?.admin != null;
+
+        if (isAdmin || body.startsWith('!')) {
+
+          // طرد عضو: !طرد @رقم
+          if (body.startsWith('!طرد')) {
+            if (!isAdmin) {
+              await sock.sendMessage(sender, { text: '❌ هذا الأمر للمشرفين فقط!' });
+              continue;
+            }
+            const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+            if (mentioned.length === 0) {
+              await sock.sendMessage(sender, { text: '⚠️ منشن الشخص اللي تبد تطرده: !طرد @شخص' });
+              continue;
+            }
+            await sock.groupParticipantsUpdate(sender, mentioned, 'remove');
+            await sock.sendMessage(sender, { text: `✅ تم طرد ${mentioned.length} عضو` });
+            continue;
+          }
+
+          // كتم عضو: !كتم @رقم
+          if (body.startsWith('!كتم')) {
+            if (!isAdmin) {
+              await sock.sendMessage(sender, { text: '❌ هذا الأمر للمشرفين فقط!' });
+              continue;
+            }
+            const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
+            if (mentioned.length === 0) {
+              await sock.sendMessage(sender, { text: '⚠️ منشن الشخص: !كتم @شخص' });
+              continue;
+            }
+            // كتم عن طريق تنزيله من المشرفين إذا كان مشرف
+            await sock.groupParticipantsUpdate(sender, mentioned, 'demote');
+            await sock.sendMessage(sender, {
+              text: `🔇 تم كتم @${mentioned[0].split('@')[0]}`,
+              mentions: mentioned
+            });
+            continue;
+          }
+
+          // قفل المجموعة: !قفل
+          if (body === '!قفل') {
+            if (!isAdmin) {
+              await sock.sendMessage(sender, { text: '❌ هذا الأمر للمشرفين فقط!' });
+              continue;
+            }
+            await sock.groupSettingUpdate(sender, 'announcement');
+            await sock.sendMessage(sender, { text: '🔒 تم قفل المجموعة - فقط المشرفون يستطيعون الكتابة' });
+            continue;
+          }
+
+          // فتح المجموعة: !فتح
+          if (body === '!فتح') {
+            if (!isAdmin) {
+              await sock.sendMessage(sender, { text: '❌ هذا الأمر للمشرفين فقط!' });
+              continue;
+            }
+            await sock.groupSettingUpdate(sender, 'not_announcement');
+            await sock.sendMessage(sender, { text: '🔓 تم فتح المجموعة - الجميع يستطيع الكتابة' });
+            continue;
+          }
+
+          // منشن كل الأعضاء: !منشن
+          if (body.startsWith('!منشن')) {
+            if (!isAdmin) {
+              await sock.sendMessage(sender, { text: '❌ هذا الأمر للمشرفين فقط!' });
+              continue;
+            }
+            const members = groupMeta.participants.map(p => p.id);
+            const mentionText = body.replace('!منشن', '').trim() || '📢 تنبيه لجميع الأعضاء!';
+            const mentions = members.map(m => `@${m.split('@')[0]}`).join(' ');
+            await sock.sendMessage(sender, {
+              text: `${mentionText}\n\n${mentions}`,
+              mentions: members
+            });
+            continue;
+          }
+
+          // قائمة الأوامر: !مساعدة
+          if (body === '!مساعدة' || body === '!help') {
+            await sock.sendMessage(sender, {
+              text:
+                `🤖 *أوامر ${BOT_NAME}:*\n\n` +
+                `*أوامر المشرفين:*\n` +
+                `!طرد @شخص - طرد عضو\n` +
+                `!كتم @شخص - كتم عضو\n` +
+                `!قفل - قفل المجموعة\n` +
+                `!فتح - فتح المجموعة\n` +
+                `!منشن [نص] - منشن الكل\n\n` +
+                `*أوامر الجميع:*\n` +
+                `!وقت - الوقت الحالي\n` +
+                `!مساعدة - هذه القائمة`
+            });
+            continue;
+          }
+        }
+      }
+
+      // ===== ردود تلقائية ذكية (خاص ومجموعات) =====
+      const faqAction = getFAQAction(body);
+
+      if (faqAction === 'time') {
+        const now = new Date().toLocaleString('ar-SY', { timeZone: 'Asia/Damascus' });
+        await sock.sendMessage(sender, { text: `🕐 الوقت الحالي: ${now}` });
+        continue;
+      }
+
+      if (faqAction === 'welcome') {
+        await sock.sendMessage(sender, {
+          text: `👋 أهلاً وسهلاً!\nأنا *${BOT_NAME}*، اكتب *!مساعدة* لترى الأوامر`
+        });
+        continue;
+      }
+
+      if (faqAction === 'help') {
+        await sock.sendMessage(sender, {
           text:
-            `🤖 أنا *${BOT_NAME}*، مساعدك الذكي!\n\n` +
-            `الأوامر المتاحة:\n` +
-            `!مساعدة - قائمة الأوامر\n` +
-            `!وقت - الوقت الحالي\n` +
-            `!من - من أنا\n\n` +
-            `أو اكتب أي سؤال وسأرد فوراً 🧠`
+            `🤖 *أوامر ${BOT_NAME}:*\n\n` +
+            `!طرد @شخص - طرد عضو\n` +
+            `!كتم @شخص - كتم عضو\n` +
+            `!قفل - قفل المجموعة\n` +
+            `!فتح - فتح المجموعة\n` +
+            `!منشن [نص] - منشن الكل\n` +
+            `!وقت - الوقت الحالي`
         });
+        continue;
       }
 
-      if (body === '!وقت' || body === '!time') {
-        const now = new Date().toLocaleString('ar-SA', { timeZone: 'Asia/Riyadh' });
-        return sock.sendMessage(sender, { text: `🕐 الوقت: ${now}` });
+      if (faqAction === 'thanks') {
+        await sock.sendMessage(sender, { text: `على الرحب والسعة! 😊` });
+        continue;
       }
-
-      if (body === '!من' || body === '!whoami') {
-        return sock.sendMessage(sender, {
-          text: `أنا *${BOT_NAME}* 🤖\nبوت ذكي بقوة Gemini AI\nجاهز أساعدك في أي شيء!`
-        });
-      }
-
-      // ===== تحقق من الكاش أولاً =====
-      if (responseCache.has(body)) {
-        return sock.sendMessage(sender, { text: responseCache.get(body) });
-      }
-
-      // ===== Gemini AI بأقصى سرعة =====
-      try {
-        await sock.sendPresenceUpdate('composing', sender);
-        const aiReply = await getGeminiResponse(text);
-
-        // احفظ في الكاش
-        if (responseCache.size > 100) responseCache.clear();
-        responseCache.set(body, aiReply);
-
-        await sock.sendMessage(sender, { text: aiReply });
-      } catch (err) {
-        console.error('خطأ Gemini:', err.message);
-        await sock.sendMessage(sender, { text: '⚠️ جرب مرة ثانية.' });
-      }
-    }));
-  });
-}
-
-// ===== Gemini بأقصى سرعة =====
-async function getGeminiResponse(userMessage) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-
-  const response = await axios.post(url, {
-    system_instruction: {
-      parts: [{
-        text: `اسمك ${BOT_NAME}، مساعد ذكي على واتساب.
-ردودك:
-- مختصرة وسريعة
-- بالعربية دائماً
-- ودودة ومحترمة
-- بدون Markdown معقد`
-      }]
-    },
-    contents: [{ parts: [{ text: userMessage }] }],
-    generationConfig: {
-      maxOutputTokens: 512,   // أقل = أسرع
-      temperature: 0.7,
-      topP: 0.9,
     }
-  }, {
-    headers: { 'Content-Type': 'application/json' },
-    timeout: 10000 // 10 ثواني max
   });
-
-  return response.data.candidates[0].content.parts[0].text;
 }
 
 startBot();
