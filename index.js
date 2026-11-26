@@ -1,12 +1,20 @@
 const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const axios = require('axios');
-const readline = require('readline');
 const pino = require('pino');
+const http = require('http');
 
-// ===== إدخال رقم الهاتف =====
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-const question = (text) => new Promise((resolve) => rl.question(text, resolve));
+// ===== سيرفر HTTP عشان Render ما يغلق البوت =====
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end('البوت شغال ✅');
+}).listen(PORT, () => {
+  console.log(`🌐 السيرفر شغال على بورت ${PORT}`);
+});
+
+// ===== رقم الهاتف من Environment Variables =====
+const PHONE_NUMBER = process.env.PHONE_NUMBER;
 
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState('auth_info');
@@ -21,14 +29,20 @@ async function startBot() {
 
   // ===== ربط برقم الهاتف =====
   if (!sock.authState.creds.registered) {
-    const phoneNumber = await question('أدخل رقم هاتفك مع كود الدولة (مثال: 9627XXXXXXXX): ');
-    const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
-
+    if (!PHONE_NUMBER) {
+      console.log('❌ حط رقم هاتفك في Environment Variables باسم PHONE_NUMBER');
+      process.exit(1);
+    }
+    const cleanNumber = PHONE_NUMBER.replace(/[^0-9]/g, '');
     setTimeout(async () => {
-      const code = await sock.requestPairingCode(cleanNumber);
-      console.log(`\n✅ كود الربط: ${code}`);
-      console.log('روح لواتساب ← الأجهزة المرتبطة ← ربط جهاز ← ربط برقم الهاتف');
-      console.log('وأدخل الكود هناك\n');
+      try {
+        const code = await sock.requestPairingCode(cleanNumber);
+        console.log(`\n✅ كود الربط: ${code}`);
+        console.log('روح لواتساب ← الأجهزة المرتبطة ← ربط جهاز ← ربط برقم الهاتف');
+        console.log('وأدخل الكود هناك\n');
+      } catch (err) {
+        console.error('خطأ في طلب الكود:', err.message);
+      }
     }, 3000);
   }
 
@@ -43,13 +57,11 @@ async function startBot() {
       const shouldReconnect = (lastDisconnect?.error instanceof Boom)
         ? lastDisconnect.error.output?.statusCode !== DisconnectReason.loggedOut
         : true;
-
       console.log('❌ انقطع الاتصال، جاري إعادة المحاولة...');
       if (shouldReconnect) startBot();
 
     } else if (connection === 'open') {
       console.log('✅ البوت متصل وشغال مع Gemini!');
-      rl.close();
     }
   });
 
