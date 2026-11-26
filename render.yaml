@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: whatsapp-ai-bot
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
