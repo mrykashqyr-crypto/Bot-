@@ -1,7 +1,7 @@
 {
   "name": "tariq-whatsapp-bot",
   "version": "1.0.0",
-  "description": "بوت واتساب طارق - أقصى سرعة",
+  "description": "بوت واتساب طارق - مشرف مجموعات",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
@@ -10,7 +10,6 @@
   "dependencies": {
     "@whiskeysockets/baileys": "^6.7.0",
     "@hapi/boom": "^10.0.1",
-    "axios": "^1.6.0",
     "pino": "^8.17.0",
     "node-cache": "^5.1.2"
   },
